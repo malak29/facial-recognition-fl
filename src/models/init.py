@@ -16,6 +16,11 @@ from .model_utils import (
     ModelSerializer,
     get_model_summary
 )
+from .base_model import BaseModel
+from .cnn_model import CNNModel, ResNetModel, EfficientNetModel
+from .client_model import ClientModel
+from .server_model import ServerModel
+
 
 __all__ = [
     'FaceRecognitionModel',
@@ -29,5 +34,11 @@ __all__ = [
     'ModelCheckpoint',
     'ModelRegistry',
     'ModelSerializer',
-    'get_model_summary'
+    'get_model_summary',
+    'BaseModel',
+    'CNNModel',
+    'ResNetModel', 
+    'EfficientNetModel',
+    'ClientModel',
+    'ServerModel'
 ]
