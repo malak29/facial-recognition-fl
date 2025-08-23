@@ -1,0 +1,288 @@
+# Docker Compose for Federated Learning System
+version: '3.8'
+
+services:
+  # Redis for caching and message brokering
+  redis:
+    image: redis:7.2-alpine
+    container_name: fl_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - fl_network
+
+  # PostgreSQL for metadata storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: fl_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=federated_learning
+      - POSTGRES_USER=fl_user
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5432:5432"
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fl_user -d federated_learning"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - fl_network
+
+  # Federated Learning Server
+  fl_server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    container_name: fl_server
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://fl_user@postgres:5432/federated_learning
+      - WORKERS=4
+      - TIMEOUT=120
+      - MAX_CLIENTS=50
+      - MIN_CLIENTS=2
+      - ROUND_TIMEOUT=300
+      - AGGREGATION_STRATEGY=fedavg
+      - PRIVACY_ENABLED=true
+      - FAIRNESS_ENABLED=true
+    volumes:
+      - fl_data:/app/data:rw
+      - fl_checkpoints:/app/checkpoints:rw
+      - fl_logs:/app/logs:rw
+      - fl_configs:/app/configs:rw
+    ports:
+      - "8080:8080"  # Main API port
+      - "8081:8081"  # Federated communication port
+      - "8082:8082"  # Metrics/monitoring port
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    secrets:
+      - postgres_password
+      - api_secret_key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - fl_network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+
+  # Federated Learning Client (Scalable)
+  fl_client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - SERVER_ENDPOINT=http://fl_server:8081
+      - CLIENT_ID=${CLIENT_ID:-client_1}
+      - AUTO_PARTICIPATE=true
+      - PRIVACY_ENABLED=false
+      - FAIRNESS_ENABLED=true
+      - MIN_DATA_SAMPLES=50
+    volumes:
+      - fl_client_data:/app/data:ro
+      - fl_logs:/app/logs:rw
+    depends_on:
+      fl_server:
+        condition: service_healthy
+    networks:
+      - fl_network
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+  # Nginx Load Balancer and Reverse Proxy
+  nginx:
+    image: nginx:1.24-alpine
+    container_name: fl_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+      - ./docker/static:/var/www/static:ro
+    depends_on:
+      - fl_server
+    networks:
+      - fl_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: fl_prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - fl_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: fl_grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_admin_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    secrets:
+      - grafana_admin_password
+    networks:
+      - fl_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.48
+    container_name: fl_jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    networks:
+      - fl_network
+
+  # MinIO for object storage (model artifacts, data)
+  minio:
+    image: minio/minio:RELEASE.2023-08-31T15-31-16Z
+    container_name: fl_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD_FILE=/run/secrets/minio_password
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    secrets:
+      - minio_password
+    networks:
+      - fl_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Named volumes for persistent data
+volumes:
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  minio_data:
+    driver: local
+  fl_data:
+    driver: local
+  fl_checkpoints:
+    driver: local
+  fl_logs:
+    driver: local
+  fl_configs:
+    driver: local
+  fl_client_data:
+    driver: local
+
+# Docker secrets for sensitive information
+secrets:
+  postgres_password:
+    file: ./docker/secrets/postgres_password.txt
+  grafana_admin_password:
+    file: ./docker/secrets/grafana_admin_password.txt
+  minio_password:
+    file: ./docker/secrets/minio_password.txt
+  api_secret_key:
+    file: ./docker/secrets/api_secret_key.txt
+
+# Custom network
+networks:
+  fl_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+

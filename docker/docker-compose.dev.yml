@@ -1,0 +1,28 @@
+
+version: '3.8'
+
+services:
+  fl_server:
+    build:
+      target: builder  # Use builder stage for development
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+    volumes:
+      - ../src:/app/src:ro  # Mount source code for hot reload
+      - ../api:/app/api:ro
+      - ../config:/app/config:ro
+    command: ["python", "-m", "api.app", "--reload", "--host", "0.0.0.0", "--port", "8080"]
+
+  fl_client:
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ../src:/app/src:ro
+
+  # Development database with exposed port
+  postgres:
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts

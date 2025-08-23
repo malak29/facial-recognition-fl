@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  fl_server:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=WARNING
+      - WORKERS=8
+      - ENABLE_METRICS=true
+      - SENTRY_DSN=${SENTRY_DSN}
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  fl_client:
+    deploy:
+      replicas: 5
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+
+  # Add external monitoring
+  node_exporter:
+    image: prom/node-exporter:v1.6.1
+    container_name: fl_node_exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    networks:
+      - fl_network

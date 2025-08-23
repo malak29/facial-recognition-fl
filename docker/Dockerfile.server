@@ -1,0 +1,108 @@
+# Multi-stage Dockerfile for Federated Learning Server
+FROM python:3.11-slim as builder
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    libopencv-dev \
+    libhdf5-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libv4l-dev \
+    libxvidcore-dev \
+    libx264-dev \
+    libatlas-base-dev \
+    gfortran \
+    wget \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user for security
+RUN groupadd -g 999 appuser && \
+    useradd -r -u 999 -g appuser appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Production stage
+FROM python:3.11-slim as production
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_ENV=production
+ENV LOG_LEVEL=INFO
+ENV WORKERS=4
+ENV TIMEOUT=120
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    libopencv-dev \
+    libhdf5-dev \
+    libjpeg-dev \
+    libpng-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN groupadd -g 999 appuser && \
+    useradd -r -u 999 -g appuser appuser
+
+# Create application directories
+RUN mkdir -p /app/logs /app/checkpoints /app/data /app/configs && \
+    chown -R appuser:appuser /app
+
+# Set working directory
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Create entrypoint script
+COPY --chown=appuser:appuser docker/entrypoint-server.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Switch to non-root user
+USER appuser
+
+# Expose ports
+EXPOSE 8080 8081 8082
+
+# Set entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Default command
+CMD ["python", "-m", "api.app"]
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="Federated Learning Server"
+LABEL org.opencontainers.image.description="Production-ready federated learning server with bias mitigation"
+LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.authors="FL Team"
+LABEL org.opencontainers.image.source="https://github.com/yourorg/federated-learning"
+LABEL org.opencontainers.image.documentation="https://docs.yourorg.com/federated-learning"
